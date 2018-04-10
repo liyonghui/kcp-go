@@ -18,7 +18,7 @@ const (
 	IKCP_ASK_SEND    = 1  // need to send IKCP_CMD_WASK
 	IKCP_ASK_TELL    = 2  // need to send IKCP_CMD_WINS
 	IKCP_WND_SND     = 32
-	IKCP_WND_RCV     = 32
+	IKCP_WND_RCV     = 128 // must >= max fragment size
 	IKCP_MTU_DEF     = 1400
 	IKCP_ACK_FAST    = 3
 	IKCP_INTERVAL    = 100
