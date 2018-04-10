@@ -418,6 +418,36 @@ func (s *UDPSession) SetNoDelay(nodelay, interval, resend, nc int) {
 	s.kcp.NoDelay(nodelay, interval, resend, nc)
 }
 
+// UrgeInterval 催促间隔
+func (s *UDPSession) UrgeInterval(interval uint32, force bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if interval > 5000 {
+		interval = 5000
+	} else if interval < 10 {
+		interval = 10
+	}
+	s.kcp.urge_interval = interval
+	s.kcp.urge_force = force
+}
+
+// GetPing 获取ping值
+func (s *UDPSession) GetPing() uint32 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return uint32(s.kcp.rx_srtt)
+}
+
+// LostRate 丢包率
+func (s *UDPSession) LostRate() float32 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.kcp.lost_rate
+}
+
 // SetDSCP sets the 6bit DSCP field of IP header, no effect if it's accepted from Listener
 func (s *UDPSession) SetDSCP(dscp int) error {
 	s.mu.Lock()

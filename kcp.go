@@ -7,27 +7,30 @@ import (
 )
 
 const (
-	IKCP_RTO_NDL     = 30  // no delay min rto
-	IKCP_RTO_MIN     = 100 // normal min rto
-	IKCP_RTO_DEF     = 200
-	IKCP_RTO_MAX     = 60000
-	IKCP_CMD_PUSH    = 81 // cmd: push data
-	IKCP_CMD_ACK     = 82 // cmd: ack
-	IKCP_CMD_WASK    = 83 // cmd: window probe (ask)
-	IKCP_CMD_WINS    = 84 // cmd: window size (tell)
-	IKCP_ASK_SEND    = 1  // need to send IKCP_CMD_WASK
-	IKCP_ASK_TELL    = 2  // need to send IKCP_CMD_WINS
-	IKCP_WND_SND     = 32
-	IKCP_WND_RCV     = 128 // must >= max fragment size
-	IKCP_MTU_DEF     = 1400
-	IKCP_ACK_FAST    = 3
-	IKCP_INTERVAL    = 100
-	IKCP_OVERHEAD    = 24
-	IKCP_DEADLINK    = 20
-	IKCP_THRESH_INIT = 2
-	IKCP_THRESH_MIN  = 2
-	IKCP_PROBE_INIT  = 7000   // 7 secs to probe window size
-	IKCP_PROBE_LIMIT = 120000 // up to 120 secs to probe window
+	IKCP_RTO_NDL                 = 30  // no delay min rto
+	IKCP_RTO_MIN                 = 100 // normal min rto
+	IKCP_RTO_DEF                 = 200
+	IKCP_RTO_MAX                 = 60000
+	IKCP_CMD_PUSH                = 81 // cmd: push data
+	IKCP_CMD_ACK                 = 82 // cmd: ack
+	IKCP_CMD_WASK                = 83 // cmd: window probe (ask)
+	IKCP_CMD_WINS                = 84 // cmd: window size (tell)
+	IKCP_ASK_SEND                = 1  // need to send IKCP_CMD_WASK
+	IKCP_ASK_TELL                = 2  // need to send IKCP_CMD_WINS
+	IKCP_WND_SND                 = 32
+	IKCP_WND_RCV                 = 128 // must >= max fragment size
+	IKCP_MTU_DEF                 = 1400
+	IKCP_ACK_FAST                = 3
+	IKCP_INTERVAL                = 100
+	IKCP_OVERHEAD                = 24
+	IKCP_DEADLINK                = 20
+	IKCP_THRESH_INIT             = 2
+	IKCP_THRESH_MIN              = 2
+	IKCP_PROBE_INIT              = 7000   // 7 secs to probe window size
+	IKCP_PROBE_LIMIT             = 120000 // up to 120 secs to probe window
+	IKCP_LOST_SAMPLE             = 1000   // 对最近1000个数据包取样统计，计算丢包率
+	IKCP_URGE_DEFAULT_LOST_LIMIT = 0.02   // 丢包率大于2% 开启urge模式
+	IKCP_DEFAULT_URGE_INTERVAL   = 35     // 缺省的催促间隔(ms),为0则不开启urge（无论丢包率多高）
 )
 
 // output_callback is a prototype which ought capture conn and call conn.Write
@@ -137,6 +140,13 @@ type KCP struct {
 	fastresend     int32
 	nocwnd, stream int32
 
+	lastsent        uint32  // 最后一次数据包发送时间
+	urgedcount      uint32  // 最后一个数据包的已催促次数
+	urge_interval   uint32  // 催促最小间隔
+	urge_force      bool    // 强制催促，false时，只有存在丢包时才发urge
+	urge_lost_limit float32 // 启用urge的丢包率阈值
+	lost_rate       float32 // 丢包率
+
 	snd_queue []segment
 	rcv_queue []segment
 	snd_buf   []segment
@@ -171,6 +181,8 @@ func NewKCP(conv uint32, output output_callback) *KCP {
 	kcp.ssthresh = IKCP_THRESH_INIT
 	kcp.dead_link = IKCP_DEADLINK
 	kcp.output = output
+	kcp.urge_interval = IKCP_DEFAULT_URGE_INTERVAL
+	kcp.urge_lost_limit = IKCP_URGE_DEFAULT_LOST_LIMIT
 	return kcp
 }
 
@@ -183,6 +195,13 @@ func (kcp *KCP) newSegment(size int) (seg segment) {
 // delSegment recycles a KCP segment
 func (kcp *KCP) delSegment(seg segment) {
 	xmitBuf.Put(seg.data)
+}
+
+func (kcp *KCP) updateLostRate(seg *segment) {
+
+	lostCnt := IKCP_LOST_SAMPLE * kcp.lost_rate
+	lostCnt += float32(seg.xmit) - 1
+	kcp.lost_rate = lostCnt / (IKCP_LOST_SAMPLE + float32(seg.xmit))
 }
 
 // PeekSize checks the size of next message in the recv queue
@@ -337,6 +356,8 @@ func (kcp *KCP) Send(buffer []byte) int {
 		kcp.snd_queue = append(kcp.snd_queue, seg)
 		buffer = buffer[size:]
 	}
+	kcp.lastsent = currentMs()
+	kcp.urgedcount = 0
 	return 0
 }
 
@@ -382,6 +403,7 @@ func (kcp *KCP) parse_ack(sn uint32) {
 	for k := range kcp.snd_buf {
 		seg := &kcp.snd_buf[k]
 		if sn == seg.sn {
+			kcp.updateLostRate(seg)
 			kcp.delSegment(*seg)
 			copy(kcp.snd_buf[k:], kcp.snd_buf[k+1:])
 			kcp.snd_buf[len(kcp.snd_buf)-1] = segment{}
@@ -414,6 +436,7 @@ func (kcp *KCP) parse_una(una uint32) {
 	for k := range kcp.snd_buf {
 		seg := &kcp.snd_buf[k]
 		if _itimediff(una, seg.sn) > 0 {
+			kcp.updateLostRate(seg)
 			kcp.delSegment(*seg)
 			count++
 		} else {
@@ -548,16 +571,18 @@ func (kcp *KCP) Input(data []byte, regular, ackNoDelay bool) int {
 			if _itimediff(sn, kcp.rcv_nxt+kcp.rcv_wnd) < 0 {
 				kcp.ack_push(sn, ts)
 				if _itimediff(sn, kcp.rcv_nxt) >= 0 {
-					seg := kcp.newSegment(int(length))
-					seg.conv = conv
-					seg.cmd = cmd
-					seg.frg = frg
-					seg.wnd = wnd
-					seg.ts = ts
-					seg.sn = sn
-					seg.una = una
-					copy(seg.data, data[:length])
-					kcp.parse_data(seg)
+					if length > 0 { // 不包含数据的包（可能是催促包），不需要通知上层
+						seg := kcp.newSegment(int(length))
+						seg.conv = conv
+						seg.cmd = cmd
+						seg.frg = frg
+						seg.wnd = wnd
+						seg.ts = ts
+						seg.sn = sn
+						seg.una = una
+						copy(seg.data, data[:length])
+						kcp.parse_data(seg)
+					}
 				} else {
 					atomic.AddUint64(&DefaultSnmp.RepeatSegs, 1)
 				}
@@ -846,6 +871,23 @@ func (kcp *KCP) flush(ackOnly bool) {
 	}
 }
 
+func (kcp *KCP) urging(current uint32) bool {
+
+	if kcp.urge_interval == 0 || //未启用
+		(!kcp.urge_force && kcp.lost_rate < kcp.urge_lost_limit) || // 未强制开启，丢包率小于2%时不启用
+		current-kcp.lastsent < kcp.urge_interval || // 未到催促时间
+		len(kcp.snd_queue) > 0 || // 不需要催促
+		kcp.urgedcount >= 5 { // 对一个数据包，最多重复催促5次
+		return false
+	}
+
+	seg := segment{}
+	kcp.snd_queue = append(kcp.snd_queue, seg)
+	kcp.urgedcount++
+	kcp.lastsent = current
+	return true
+}
+
 // Update updates state (call it repeatedly, every 10ms-100ms), or you can ask
 // ikcp_check when to call it again (without ikcp_input/_send calling).
 // 'current' - current timestamp in millisec.
@@ -853,6 +895,9 @@ func (kcp *KCP) Update() {
 	var slap int32
 
 	current := currentMs()
+
+	need_urge := kcp.urging(current)
+
 	if kcp.updated == 0 {
 		kcp.updated = 1
 		kcp.ts_flush = current
@@ -865,7 +910,7 @@ func (kcp *KCP) Update() {
 		slap = 0
 	}
 
-	if slap >= 0 {
+	if slap >= 0 || need_urge {
 		kcp.ts_flush += kcp.interval
 		if _itimediff(current, kcp.ts_flush) >= 0 {
 			kcp.ts_flush = current + kcp.interval
