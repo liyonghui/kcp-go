@@ -977,7 +977,7 @@ func (kcp *KCP) WndSize(sndwnd, rcvwnd int) int {
 		kcp.snd_wnd = uint32(sndwnd)
 	}
 	if rcvwnd > 0 {
-		kcp.rcv_wnd = uint32(rcvwnd)
+		kcp.rcv_wnd = _imax_(uint32(rcvwnd), IKCP_WND_RCV)
 	}
 	return 0
 }
