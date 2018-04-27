@@ -876,12 +876,13 @@ func (kcp *KCP) urging(current uint32) bool {
 	if kcp.urge_interval == 0 || //未启用
 		(!kcp.urge_force && kcp.lost_rate < kcp.urge_lost_limit) || // 未强制开启，丢包率小于2%时不启用
 		current-kcp.lastsent < kcp.urge_interval || // 未到催促时间
-		len(kcp.snd_queue) > 0 || // 不需要催促
+		len(kcp.snd_queue) > 0 || // 不需要催促(存在后续包需要发送)
+		len(kcp.snd_buf) == 0 || // 不需要催促（没有未确认数据包）
 		kcp.urgedcount >= 5 { // 对一个数据包，最多重复催促5次
 		return false
 	}
 
-	seg := segment{}
+	seg := kcp.newSegment(0)
 	kcp.snd_queue = append(kcp.snd_queue, seg)
 	kcp.urgedcount++
 	kcp.lastsent = current

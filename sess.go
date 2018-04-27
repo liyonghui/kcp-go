@@ -423,7 +423,8 @@ func (s *UDPSession) UrgeInterval(interval uint32, force bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if interval > 5000 {
+	if interval == 0 {
+	} else if interval > 5000 {
 		interval = 5000
 	} else if interval < 10 {
 		interval = 10
@@ -546,7 +547,7 @@ func (s *UDPSession) output(buf []byte) {
 // kcp update, returns interval for next calling
 func (s *UDPSession) update() (interval time.Duration) {
 	s.mu.Lock()
-	s.kcp.flush(false)
+	s.kcp.Update()
 	if s.kcp.WaitSnd() < int(s.kcp.snd_wnd) {
 		s.notifyWriteEvent()
 	}
